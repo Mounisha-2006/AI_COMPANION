@@ -78,6 +78,7 @@ def get_quiz_detail(
     )
 
 @router.get("/projects/{project_id}/quiz", response_model=List[QuizListItem])
+@router.get("/projects/{project_id}/quizzes", response_model=List[QuizListItem])
 def list_project_quizzes(
     project_id: int,
     db: Session = Depends(get_db),

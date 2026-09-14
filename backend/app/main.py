@@ -9,8 +9,9 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.database.session import engine
@@ -83,6 +84,28 @@ async def log_requests(request: Request, call_next):
             content={"detail": "Internal server error."}
         )
 
+@app.middleware("http")
+async def spa_middleware(request: Request, call_next):
+    # Intercept browser HTML navigations to SPA routes
+    if request.method == "GET":
+        accept = request.headers.get("accept", "")
+        path = request.url.path
+        if (
+            "text/html" in accept
+            and not path.startswith("/docs")
+            and not path.startswith("/redoc")
+            and not path.startswith("/openapi.json")
+            and not path.startswith("/health")
+        ):
+            frontend_dist = (Path(settings.ROOT_DIR) / "frontend" / "dist").resolve()
+            index_html = frontend_dist / "index.html"
+            if index_html.exists():
+                target = frontend_dist / path.lstrip("/")
+                if path.strip("/") and target.is_file():
+                    return FileResponse(str(target))
+                return FileResponse(str(index_html))
+    return await call_next(request)
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Global unhandled exception on {request.method} {request.url.path}: {exc}\n{traceback.format_exc()}")
@@ -127,4 +150,28 @@ app.include_router(growth_router, prefix=api_prefix)
 app.include_router(recommendation_router, prefix=api_prefix)
 app.include_router(analytics_router, prefix=api_prefix)
 app.include_router(admin_router, prefix=api_prefix)
+
+# Mount static production frontend assets and fallback
+frontend_dist = (Path(settings.ROOT_DIR) / "frontend" / "dist").resolve()
+assets_dir = frontend_dist / "assets"
+if assets_dir.exists():
+    app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend_assets")
+
+API_PREFIXES = (
+    "/api", "/auth", "/spaces", "/projects", "/materials",
+    "/activity", "/tutor", "/quizzes", "/assessments",
+    "/mastery", "/growth", "/recommendations", "/analytics",
+    "/admin", "/health", "/docs", "/redoc", "/openapi.json"
+)
+
+if (frontend_dist / "index.html").exists():
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa_fallback(request: Request, full_path: str):
+        path = request.url.path
+        if any(path == p or path.startswith(f"{p}/") for p in API_PREFIXES):
+            raise HTTPException(status_code=404, detail="Not Found")
+        target = frontend_dist / full_path
+        if full_path and target.is_file():
+            return FileResponse(str(target))
+        return FileResponse(str(frontend_dist / "index.html"))
 
